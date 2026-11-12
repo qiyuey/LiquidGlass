@@ -1,4 +1,4 @@
-package io.github.liuran001.mmliquidglass;
+package top.qiyuey.liquidglass;
 
 import android.app.Activity;
 import android.app.Instrumentation;
@@ -104,7 +104,6 @@ public class LiquidGlassModule extends XposedModule {
                                 Activity activity = (Activity) arg0;
                                 String name = arg0.getClass().getName();
                                 if (app.launcherActivity.equals(name)) {
-                                    GlassConfig.load(activity);
                                     sResumeHits++;
                                     if (sResumeHits <= 3 || sResumeHits % 20 == 0) {
                                         log(android.util.Log.INFO,

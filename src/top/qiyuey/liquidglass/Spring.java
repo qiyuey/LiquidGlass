@@ -1,4 +1,4 @@
-package io.github.liuran001.mmliquidglass;
+package top.qiyuey.liquidglass;
 
 /**
  * A single critically-parameterised spring, matching Compose's

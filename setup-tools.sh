@@ -1,42 +1,31 @@
 #!/usr/bin/env bash
-# Downloads the toolchain build.sh expects into $TOOL_ROOT (default ./tools).
+# Populate only project dependencies and the SDK packages pinned in toolchain.env.
 set -euo pipefail
-
 PROJ="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$PROJ/toolchain.env"
 TOOL_ROOT="${TOOL_ROOT:-$PROJ/tools}"
+SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/Android/Sdk}}"
 mkdir -p "$TOOL_ROOT"
-cd "$TOOL_ROOT"
-
 fetch() {
-    local url="$1" out="$2"
-    [ -s "$out" ] && { echo "  have $out"; return; }
-    echo "  fetching $out"
-    curl -sSLf -o "$out" "$url"
+    local primary="$1" mirror="$2" output="$3"
+    [ -s "$output" ] && return
+    curl -fL --connect-timeout 15 "$primary" -o "$output" || curl -fL "$mirror" -o "$output"
 }
-
-echo "[1/3] libraries"
-fetch https://repo1.maven.org/maven2/io/github/libxposed/api/102.0.0/api-102.0.0.aar api-102.aar
-
-echo "[2/3] android sdk pieces"
-fetch https://dl.google.com/android/repository/build-tools_r34-linux.zip bt34.zip
-fetch https://dl.google.com/android/repository/platform-34-ext7_r03.zip plat34.zip
-
-echo "[3/3] unpack"
-# Unpacked via python, for the same reason build.sh zips that way: NixOS ships
-# no unzip(1). The exec bit has to be carried over by hand — aapt2, d8 and
-# zipalign come out of the archive as plain files otherwise.
-python3 - <<'PYUNZIP'
-import os, zipfile
-for src, dst in (("api-102.aar", "xapi"), ("bt34.zip", "bt"), ("plat34.zip", "plat")):
-    os.makedirs(dst, exist_ok=True)
-    with zipfile.ZipFile(src) as z:
-        for info in z.infolist():
-            out = z.extract(info, dst)
-            mode = info.external_attr >> 16
-            if mode:
-                os.chmod(out, mode)
-    print(f"  unpacked {src} -> {dst}/")
-PYUNZIP
-chmod +x bt/*/aapt2 bt/*/d8 bt/*/zipalign 2>/dev/null || true
-
-echo "done. tools in $TOOL_ROOT"
+api_path="io/github/libxposed/api/$XPOSED_API/api-$XPOSED_API.aar"
+fetch "https://repo.maven.apache.org/maven2/$api_path" "https://maven.aliyun.com/repository/central/$api_path" "$TOOL_ROOT/api-$XPOSED_API.aar"
+r8_path="com/android/tools/r8/$R8_VERSION/r8-$R8_VERSION.jar"
+fetch "https://dl.google.com/dl/android/maven2/$r8_path" "https://maven.aliyun.com/repository/google/$r8_path" "$TOOL_ROOT/r8-$R8_VERSION.jar"
+echo "$R8_SHA256  $TOOL_ROOT/r8-$R8_VERSION.jar" | sha256sum -c -
+python3 - "$TOOL_ROOT" "$XPOSED_API" <<'PY'
+from pathlib import Path
+import sys, zipfile
+root, version = Path(sys.argv[1]), sys.argv[2]
+with zipfile.ZipFile(root/f'api-{version}.aar') as archive:
+    (root/f'libxposed-api-{version}.jar').write_bytes(archive.read('classes.jar'))
+PY
+if [ ! -f "$SDK_ROOT/platforms/$COMPILE_SDK/android.jar" ] || [ ! -d "$SDK_ROOT/build-tools/$BUILD_TOOLS" ]; then
+    SDKMANAGER="${SDKMANAGER:-$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager}"
+    [ -x "$SDKMANAGER" ] || { echo "Install official SDK command-line tools or set SDKMANAGER." >&2; exit 1; }
+    "$SDKMANAGER" --sdk_root="$SDK_ROOT" "platforms;$COMPILE_SDK" "build-tools;$BUILD_TOOLS"
+fi
+echo "Ready: JDK $JDK_VERSION, $COMPILE_SDK, Build Tools $BUILD_TOOLS, R8 $R8_VERSION, libxposed $XPOSED_API"

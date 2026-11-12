@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the Liquid Glass LSPosed module for WeChat and QQ (libxposed api 102).
+# Build the Liquid Glass LSPosed module with registered host adapters (libxposed API 102).
 #
 # No Gradle/Android Studio: this drives javac + d8 + aapt2 + apksigner directly.
 # Run ./setup-tools.sh once to populate $TOOL_ROOT.
@@ -7,29 +7,29 @@ set -euo pipefail
 
 PROJ="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOL_ROOT="${TOOL_ROOT:-$PROJ/tools}"
-OUT="$PROJ/build"
+source "$PROJ/toolchain.env"
+SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/Android/Sdk}}"
+mkdir -p "$PROJ/build"
+OUT="$(mktemp -d "$PROJ/build/run-XXXXXXXX")"
 VERSION="$(sed -n 's/.*android:versionName="\([^"]*\)".*/\1/p' "$PROJ/AndroidManifest.xml")"
 
-PLATFORM="$TOOL_ROOT/plat/android-34/android.jar"
-BT="$TOOL_ROOT/bt/android-14"
-XAPI="$TOOL_ROOT/xapi/classes.jar"
+PLATFORM="$SDK_ROOT/platforms/$COMPILE_SDK/android.jar"
+BT="$SDK_ROOT/build-tools/$BUILD_TOOLS"
+D8="$TOOL_ROOT/r8-$R8_VERSION.jar"
+XAPI="$TOOL_ROOT/libxposed-api-$XPOSED_API.jar"
 
-for f in "$PLATFORM" "$BT/aapt2" "$BT/lib/d8.jar" "$XAPI"; do
+for f in "$PLATFORM" "$BT/aapt2" "$D8" "$XAPI"; do
     [ -e "$f" ] || { echo "missing: $f  (run ./setup-tools.sh)" >&2; exit 1; }
 done
 
-if ! command -v javac >/dev/null 2>&1; then
-    JDK="$(nix build --no-link --print-out-paths nixpkgs#jdk17 2>/dev/null | head -1)"
-    [ -n "$JDK" ] || { echo "no JDK on PATH and nix fallback failed" >&2; exit 1; }
-    export PATH="$JDK/bin:$PATH"
-fi
-
-rm -rf "$OUT"
+javac -version 2>&1 | grep -Eq '^javac 27([.]|$)' || {
+    echo "JDK 27 is required; set JAVA_HOME/PATH." >&2; exit 1;
+}
 mkdir -p "$OUT/classes" "$OUT/dex"
 
 echo "[1/7] javac"
 find "$PROJ/src" -name '*.java' > "$OUT/sources.txt"
-javac -encoding UTF-8 --release 11 -Xlint:-options \
+javac -encoding UTF-8 --release "$JAVA_RELEASE" -Xlint:-options \
     -classpath "$PLATFORM:$XAPI" \
     -d "$OUT/classes" \
     @"$OUT/sources.txt"
@@ -38,7 +38,7 @@ echo "[2/7] jar + d8"
 (cd "$OUT/classes" && jar cf "$OUT/classes.jar" .)
 # Invoke d8.jar directly: the shipped wrapper hardcodes #!/bin/bash, which
 # does not exist on NixOS.
-java -cp "$BT/lib/d8.jar" com.android.tools.r8.D8 \
+java -cp "$D8" com.android.tools.r8.D8 \
     --release --lib "$PLATFORM" --min-api 26 \
     --output "$OUT/dex" \
     "$OUT/classes.jar"
@@ -95,10 +95,10 @@ else
     SIGN_ARGS=(--ks "$KS" --ks-pass pass:android --key-pass pass:android)
 fi
 FINAL="$PROJ/LiquidGlass-v$VERSION.apk"
-java -cp "$BT/lib/apksigner.jar" com.android.apksigner.ApkSignerTool sign \
+java --enable-native-access=ALL-UNNAMED -cp "$BT/lib/apksigner.jar" com.android.apksigner.ApkSignerTool sign \
     "${SIGN_ARGS[@]}" --out "$FINAL" "$OUT/aligned.apk"
 
 echo "[7/7] verify"
-java -cp "$BT/lib/apksigner.jar" com.android.apksigner.ApkSignerTool verify \
+java --enable-native-access=ALL-UNNAMED -cp "$BT/lib/apksigner.jar" com.android.apksigner.ApkSignerTool verify \
     --print-certs "$FINAL" | head -3
 ls -la "$FINAL"

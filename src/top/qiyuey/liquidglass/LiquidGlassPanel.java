@@ -1,4 +1,4 @@
-package io.github.liuran001.mmliquidglass;
+package top.qiyuey.liquidglass;
 
 import android.content.Context;
 import android.graphics.Canvas;
@@ -55,11 +55,11 @@ final class LiquidGlassPanel extends View {
     static final int LENS_MIN_SDK = 33;
 
     /** KernelSU: lens(refractionHeight = 24.dp, refractionAmount = 24.dp). */
-    private static final float REFRACTION_DP = 24f;
+    private static final float REFRACTION_DP = GlassStyle.PANEL_REFRACTION_DP;
     /** KernelSU: blur(4.dp, 4.dp). */
-    private static final float BLUR_DP = 4f;
+    private static final float BLUR_DP = GlassStyle.BLUR_DP;
     /** KernelSU: vibrancy() -> colorControls(saturation = 1.5f). */
-    private static final float SATURATION = 1.5f;
+    private static final float SATURATION = GlassStyle.SATURATION;
 
     static final String SDF_SOURCE = ""
             + "float radiusAt(float2 coord, float4 radii) {\n"

@@ -1,4 +1,4 @@
-package io.github.liuran001.mmliquidglass;
+package top.qiyuey.liquidglass;
 
 import android.app.Activity;
 import android.content.Context;
@@ -13,29 +13,10 @@ import android.widget.FrameLayout;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Method;
 
-/**
- * Moves the host app's bottom tab bar into a floating liquid-glass pill.
- *
- * <p>Unlike the HeyBox original this is ported from, no layout surgery on the
- * content area is needed. Both supported apps already lay the content out at
- * full screen height with the tab bar floating over it inside a FrameLayout —
- * WeChat's {@code CustomViewPager}, QQ's {@code tabcontent} — so the backdrop
- * the glass refracts is there from the start. We only reparent the bar and
- * strip the solid colour the app paints behind it.
- *
- * <p>Nothing below names a class: the bar arrives already located (see
- * {@link TabBarBridge}) and everything from there on is geometry.
- */
+
 final class LiquidGlassInstaller {
 
-    /**
-     * Retry budget for the first layout pass after the home activity resumes.
-     * Both apps build their home screen asynchronously (WeChat's
-     * FirstScreenFrameLayout and blink preloading; QQ's SplashActivity, which
-     * may sit on a login screen first), so the bar can show up seconds after
-     * onResume. This polling is only a safety net — the primary trigger is the
-     * tab-switch hook.
-     */
+
     private static final int MAX_ATTEMPTS = 40;
     private static final long RETRY_DELAY_MS = 250L;
 
@@ -63,15 +44,9 @@ final class LiquidGlassInstaller {
      */
     private static long sTabRowEmptySinceMs;
     private static final long TAB_ROW_EMPTY_GIVE_UP_MS = 2000L;
-    /** Content height established during install, before QQ's navigation reserve. */
+
     private static int sBarHeight;
-    /**
-     * Last real navigation-bar inset seen before our edge-to-edge listener
-     * strips it from the app's view tree. Kept across Activity recreation: QQ
-     * rebuilds SplashActivity when its skin follows system day/night, while the
-     * DecorView (and therefore the stripping listener) can survive long enough
-     * for the replacement tab bar to report an inset of zero.
-     */
+
     private static int sNavigationInset;
     /** The app's own frosted strip and the bar's hairline, held hidden. */
     private static WeakReference<View> sBlurLayerRef = new WeakReference<>(null);
@@ -135,7 +110,6 @@ final class LiquidGlassInstaller {
                             decor.getViewTreeObserver().removeOnPreDrawListener(this);
                         } else if (bar != null && bar.getAlpha() != 0f) {
                             bar.setAlpha(0f);
-                            // QQ's own frosted strip is a separate view and
                             // stays lit with the bar faded out, which reads as
                             // a grey band across the bottom for the whole cold
                             // start. It goes at the same moment the bar does.
@@ -153,7 +127,7 @@ final class LiquidGlassInstaller {
         // not wrap the Activity, so the window is not reachable from them.
         sActivityRef = new WeakReference<>(activity);
         View decor = activity.getWindow().getDecorView();
-        if (sHostRef.get() == null) {
+        if (sHostRef.get() == null && LiquidGlassModule.app().adapter.hideStockUntilReady()) {
             hideStockBarUntilInstalled(decor);
         }
         decor.post(() -> tryInstall(activity, decor, 0));
@@ -195,6 +169,12 @@ final class LiquidGlassInstaller {
                 return;
             }
             install(tabView);
+            if (!(tabView.getParent() instanceof LiquidGlassHostLayout)) {
+                tabView.setAlpha(1f);
+                if (attempt < MAX_ATTEMPTS) {
+                    decor.postDelayed(() -> tryInstall(activity, decor, attempt + 1), RETRY_DELAY_MS);
+                }
+            }
         } catch (Throwable t) {
             LiquidGlassModule.logErr("install failed", t);
         }
@@ -240,23 +220,30 @@ final class LiquidGlassInstaller {
     }
 
     private static void install(ViewGroup tabView) {
-        ViewGroup parent = tabView.getParent() instanceof ViewGroup
+        ViewGroup originalParent = tabView.getParent() instanceof ViewGroup
                 ? (ViewGroup) tabView.getParent() : null;
-        if (parent == null) {
+        if (originalParent == null) {
             return;
         }
-        if (parent instanceof LiquidGlassHostLayout) {
+        if (originalParent instanceof LiquidGlassHostLayout) {
             return; // already installed
         }
-
-        ViewGroup backdrop = findBackdrop(parent, tabView);
+        int originalIndex = originalParent.indexOfChild(tabView);
+        HostAdapter adapter = LiquidGlassModule.app().adapter;
+        BarMount mount = adapter.mount(sActivityRef.get(), tabView);
+        if (mount == null) {
+            LiquidGlassModule.log(android.util.Log.WARN, "Host content root unavailable; keep stock bar");
+            return;
+        }
+        ViewGroup parent = mount.parent;
+        ViewGroup backdrop = mount.backdrop;
         if (backdrop == null) {
             LiquidGlassModule.log(android.util.Log.WARN,
                     "no backdrop sibling found, glass would refract nothing");
             return;
         }
 
-        int index = parent.indexOfChild(tabView);
+        int index = parent == originalParent ? originalIndex : parent.getChildCount();
         if (index < 0) {
             return;
         }
@@ -264,7 +251,7 @@ final class LiquidGlassInstaller {
 
         Context ctx = tabView.getContext();
         float density = ctx.getResources().getDisplayMetrics().density;
-        int bottomOffset = Math.round(density * GlassConfig.barOffsetDp);
+        int bottomOffset = GlassStyle.bottomMargin(navInset(parent), parentBottomGap(parent), density);
 
         int navigationInset = rememberNavigationInset(parent);
 
@@ -274,7 +261,13 @@ final class LiquidGlassInstaller {
         // Read before the drop lands: the bar is still laid out at its old
         // height here, and the reserve is exactly what the pill must not keep.
         ViewGroup tabRow = TabBarBridge.findTabRow(tabView);
-        int barHeight = contentBarHeight(tabRow, tabView.getHeight() - navReserve);
+        if (tabRow == null || TabBarBridge.tabCount(tabRow) < 2) {
+            tabView.setAlpha(1f);
+            LiquidGlassModule.log(android.util.Log.WARN, "Native tab row is unresolved; keep stock layout");
+            return;
+        }
+        int barHeight = Math.max(contentBarHeight(tabRow, tabView.getHeight() - navReserve),
+                GlassStyle.panelHeight(density, maximumLabelHeight(tabRow)));
 
         // KernelSU's floating bar is width(IntrinsicSize.Min) — it hugs its tabs
         // and floats centred, rather than stretching edge to edge. The width has
@@ -311,11 +304,11 @@ final class LiquidGlassInstaller {
         // structural transaction either installs both levels or puts the bar
         // straight back at its original index.
         try {
-            parent.removeView(tabView);
+            originalParent.removeView(tabView);
             parent.addView(host, index, hostLp);
             host.addView(tabView, tabLp);
         } catch (Throwable t) {
-            restoreAfterFailedReparent(parent, tabView, host, index, originalLp);
+            restoreAfterFailedReparent(originalParent, tabView, host, originalIndex, originalLp);
             LiquidGlassModule.logErr("could not reparent the stock tab bar", t);
             return;
         }
@@ -334,7 +327,7 @@ final class LiquidGlassInstaller {
                 LiquidGlassModule.logErr("could not restore stock tab geometry",
                         restoreError);
             }
-            restoreAfterFailedReparent(parent, tabView, host, index, originalLp);
+            restoreAfterFailedReparent(originalParent, tabView, host, originalIndex, originalLp);
             LiquidGlassModule.logErr("could not size the floating tab bar", t);
             return;
         }
@@ -352,6 +345,8 @@ final class LiquidGlassInstaller {
         sBarHeight = barHeight;
         sLastIndex = -1;
 
+        adapter.onMounted(tabView);
+
         TabBarBridge.tryHookPager(backdrop);
 
         // Cosmetic cleanup cannot invalidate the structural install. If an app
@@ -361,20 +356,13 @@ final class LiquidGlassInstaller {
             hideOwnBlurLayers(parent, tabView);
             hideBarHairline(parent, tabView);
             stripSolidBackgrounds(tabView);
-            disableTabWidgetStrips(tabView);
         } catch (Throwable t) {
             LiquidGlassModule.logErr("could not remove all stock tab chrome", t);
         }
 
-        // QQ is the one host where the inset counts without us growing the
-        // window: extendUnderNavBar bails out there on purpose (see it for
-        // why), but QQ already lays its own decor out edge to edge, so the
-        // pill's parent does reach under the gesture bar and the correction is
-        // owed all the same.
-        boolean insetCounts = extendUnderNavBar(ctx)
-                || LiquidGlassModule.app() == HostApp.QQ;
-        if (insetCounts) {
-            hostLp.bottomMargin = bottomOffset - shadowPad + navigationInset;
+        extendUnderNavBar(ctx);
+        {
+            hostLp.bottomMargin = GlassStyle.bottomMargin(navigationInset, parentBottomGap(parent), density) - shadowPad;
             host.setLayoutParams(hostLp);
             // The first real insets dispatch can arrive either side of host
             // creation. Re-read the shared cache on the next UI turn so both
@@ -492,7 +480,6 @@ final class LiquidGlassInstaller {
             if (mRow == null) {
                 return;
             }
-            applyQqIconOnlyAlignment(mRow, false, density);
             mRow.setPadding(mRowPadding[0], mRowPadding[1],
                     mRowPadding[2], mRowPadding[3]);
             for (int i = 0; i < mTabs.length; i++) {
@@ -529,10 +516,19 @@ final class LiquidGlassInstaller {
      * why the Contacts page kept snapping back), so each container also gets a
      * layout listener that re-stretches it whenever that happens.
      */
-    private static void extendPagesToBottom(ViewGroup pager) {
-        if (pager == null) {
-            return;
-        }
+    private static void extendPagesToBottom(ViewGroup backdrop) {
+        if (backdrop != null) LiquidGlassModule.app().adapter.extendPages(backdrop);
+    }
+
+    static void padFragmentPages(ViewGroup backdrop) {
+        View tab = sTabViewRef.get();
+        if (tab instanceof ViewGroup) LiquidGlassModule.app().adapter.onMounted((ViewGroup) tab);
+        int pad = bottomReserve(backdrop);
+        if (pad > 0) padScrollersBottom(backdrop, pad, 0);
+    }
+
+    static void extendPagerPages(ViewGroup pager) {
+        if (pager == null) return;
         // The pager itself first. A page can only be stretched as far as its
         // container reaches, and WeChat sizes the pager to stop where the docked
         // bar used to start. Left short, the band the bar vacated shows the root
@@ -561,32 +557,7 @@ final class LiquidGlassInstaller {
         }
     }
 
-    /**
-     * Switches off the frosted band WeChat paints along the bottom of a page.
-     *
-     * <p>New in 8.0.72: every page is a {@code FrostedContentView} which blurs a
-     * strip of its own content the height of the docked tab bar, so the bar
-     * reads as frosted glass over the page behind it. Once the bar floats, that
-     * strip has nothing sitting on it any more and shows up on its own — a band
-     * across the bottom of the screen, lighter than the page, running the full
-     * width under the pill. It is painted in {@code dispatchDraw} rather than by
-     * a child view, which is why it never shows up in a view-tree dump.
-     *
-     * <p>Only the bottom band is dropped. The same view frosts a strip under the
-     * status bar, and that one still sits behind a real bar — it is WeChat's own
-     * look and none of our business.
-     *
-     * <p>Re-applied every frame rather than once, because setting it is not
-     * final: the setter only writes the field, and WeChat re-applies the whole
-     * frosted configuration (its {@code a(boolean, int, float)}) on theme and
-     * layout changes, which puts the band straight back. Running on the same
-     * pre-draw pass as {@link #keepNavBarClear()} means the value is right for
-     * the frame about to be drawn, whenever it was last clobbered.
-     *
-     * <p>Resolved by method name rather than by type: the class is WeChat's own
-     * and absent from QQ and from every WeChat before 8.0.72, which land on the
-     * NoSuchMethod path once and are never probed again.
-     */
+
     private static void dropBottomFrostAll() {
         ViewGroup pager = sPagerRef.get();
         if (pager == null) {
@@ -673,7 +644,7 @@ final class LiquidGlassInstaller {
     }
 
     /** Breathing room between the last row and the pill once it is scrolled clear. */
-    private static final float LAST_ROW_GAP_DP = 8f;
+    private static final float LAST_ROW_GAP_DP = GlassStyle.LAST_ROW_GAP_DP;
 
     /**
      * Room the floating bar takes up at the bottom of the screen.
@@ -754,14 +725,7 @@ final class LiquidGlassInstaller {
         });
     }
 
-    /**
-     * Removes a docked-bar reserve expressed as padding on the scroller's parent.
-     *
-     * <p>QQ's Dynamic page uses a full-height {@code QZoneBaseBlockContainer}
-     * with 152px bottom padding, so its MATCH_PARENT feed stops at 2628px inside
-     * a 2780px page. The feed gets its own scroll padding below, therefore this
-     * outer reserve must be dropped just like page-level bottom padding.
-     */
+
     private static void dropParentBottomReserve(ViewGroup parent, View child) {
         int gap = parent.getHeight() - child.getBottom();
         int reserve = parent.getPaddingBottom();
@@ -839,14 +803,12 @@ final class LiquidGlassInstaller {
             View c = root.getChildAt(i);
             // ViewPager2 is backed by a RecyclerView, but that RecyclerView is
             // only the horizontal page host. Treating it as the page scroller
-            // stops the walk here and leaves QQ's real BounceScrollView several
             // levels below untouched. Pass through pager RecyclerViews and pad
             // the first actual scrolling container inside each page instead.
             if (isViewPagerRecycler(c)) {
                 padScrollersBottom((ViewGroup) c, pad, depth + 1);
             } else if (isScroller(c)) {
                 ViewGroup sv = (ViewGroup) c;
-                // QQ's Dynamic page nests its real feed RecyclerView several
                 // containers below the page root and still measures it to the
                 // old docked bar. Its parent owns that reserve as bottom padding,
                 // so remove it before stretching the feed itself. Only touch a
@@ -927,154 +889,6 @@ final class LiquidGlassInstaller {
         }
     }
 
-    /** Saved host translation while QQ's title-less layout is active. */
-    private static final int ICON_ONLY_TRANSLATION_TAG_KEY = 0x7F5A0003;
-
-    /**
-     * Finds QQ's real tab title, excluding unread badges.
-     *
-     * <p>QAuxiliary's "hide bottom tab title" hook does not clear the text or
-     * hide the view. It leaves QQ's {@code QUIBlendTextView} visible and sets
-     * both LayoutParams dimensions to zero. QQ also tags that TextView with its
-     * original title, which is the strongest discriminator from badge views;
-     * the class/background fallback keeps this working if that implementation
-     * detail changes in a later build.
-     */
-    private static android.widget.TextView findTabTitle(View v) {
-        if (v instanceof android.widget.TextView) {
-            android.widget.TextView text = (android.widget.TextView) v;
-            CharSequence value = text.getText();
-            String name = v.getClass().getName();
-            boolean nonEmpty = value != null && value.toString().trim().length() > 0;
-            boolean badge = name.contains("Badge") || name.contains("RedTouch");
-            Object tag = v.getTag();
-            if (nonEmpty && !badge
-                    && (tag instanceof CharSequence
-                    || name.contains("BlendTextView")
-                    || v.getBackground() == null)) {
-                return text;
-            }
-        }
-        if (v instanceof ViewGroup) {
-            ViewGroup group = (ViewGroup) v;
-            for (int i = 0; i < group.getChildCount(); i++) {
-                android.widget.TextView found = findTabTitle(group.getChildAt(i));
-                if (found != null) {
-                    return found;
-                }
-            }
-        }
-        return null;
-    }
-
-    /** Whether a title still occupies a real slot in its tab. */
-    private static boolean hasUsableTabTitle(View tab) {
-        android.widget.TextView title = findTabTitle(tab);
-        if (title == null || title.getVisibility() != View.VISIBLE) {
-            return false;
-        }
-        ViewGroup.LayoutParams lp = title.getLayoutParams();
-        return lp == null || (lp.width != 0 && lp.height != 0);
-    }
-
-    /** Finds the app-owned icon view inside one tab. */
-    private static View findTabIcon(View v) {
-        HostApp app = LiquidGlassModule.app();
-        if (app != null && app.isTabIconClass(v.getClass().getName())) {
-            return v;
-        }
-        if (v instanceof ViewGroup) {
-            ViewGroup group = (ViewGroup) v;
-            for (int i = 0; i < group.getChildCount(); i++) {
-                View found = findTabIcon(group.getChildAt(i));
-                if (found != null) {
-                    return found;
-                }
-            }
-        }
-        return null;
-    }
-
-    /**
-     * True when QQ still has icon views but none of its tabs has a usable title.
-     * Restricting this to QQ avoids treating WeChat's transient construction
-     * frames as a deliberate icon-only layout.
-     */
-    private static boolean isQqIconOnlyRow(ViewGroup tabRow) {
-        if (LiquidGlassModule.app() != HostApp.QQ || tabRow == null) {
-            return false;
-        }
-        int icons = 0;
-        int titles = 0;
-        for (int i = 0; i < tabRow.getChildCount(); i++) {
-            View tab = tabRow.getChildAt(i);
-            if (tab.getVisibility() == View.GONE || findTabIcon(tab) == null) {
-                continue;
-            }
-            icons++;
-            if (hasUsableTabTitle(tab)) {
-                titles++;
-            }
-        }
-        return icons > 0 && titles == 0;
-    }
-
-    /** Adds or removes one reversible vertical offset from an app-owned view. */
-    private static void setIconOnlyTranslation(View v, boolean iconOnly, float offset) {
-        Object saved = v.getTag(ICON_ONLY_TRANSLATION_TAG_KEY);
-        if (iconOnly) {
-            float base;
-            if (saved instanceof Float) {
-                base = (Float) saved;
-            } else {
-                base = v.getTranslationY();
-                v.setTag(ICON_ONLY_TRANSLATION_TAG_KEY, base);
-            }
-            float desired = base + offset;
-            if (Math.abs(v.getTranslationY() - desired) > 0.5f) {
-                v.setTranslationY(desired);
-            }
-        } else if (saved instanceof Float) {
-            v.setTranslationY((Float) saved);
-            v.setTag(ICON_ONLY_TRANSLATION_TAG_KEY, null);
-        }
-    }
-
-    /** Moves QQ's icon and its unread badge together into the vacated title slot. */
-    private static void alignQqIconOnlyContent(View v, boolean iconOnly, float offset) {
-        String name = v.getClass().getName();
-        HostApp app = LiquidGlassModule.app();
-        if ((app != null && app.isTabIconClass(name))
-                || name.contains("Badge")) {
-            setIconOnlyTranslation(v, iconOnly, offset);
-        }
-        if (v instanceof ViewGroup) {
-            ViewGroup group = (ViewGroup) v;
-            for (int i = 0; i < group.getChildCount(); i++) {
-                alignQqIconOnlyContent(group.getChildAt(i), iconOnly, offset);
-            }
-        }
-    }
-
-    /**
-     * QQ draws its 29dp icon below 5dp top padding in a 54dp tab. With the title
-     * removed, 7.5dp is the exact shift from that icon centre to the tab centre.
-     *
-     * <p>Only the actual icon and QUIBadge move. Several tabs wrap their content
-     * in a full-size TianshuRedTouch; moving that wrapper as well as its children
-     * applies the offset twice and makes those tabs visibly lower than the first.
-     */
-    private static void applyQqIconOnlyAlignment(
-            ViewGroup tabRow, boolean iconOnly, float density) {
-        float offset = density * 7.5f;
-        for (int i = 0; i < tabRow.getChildCount(); i++) {
-            View tab = tabRow.getChildAt(i);
-            if (tab.getVisibility() != View.GONE) {
-                alignQqIconOnlyContent(tab, iconOnly, offset);
-            }
-        }
-    }
-
     /**
      * Width of the widest visible leaf inside a tab column.
      *
@@ -1104,7 +918,6 @@ final class LiquidGlassInstaller {
             return widest;
         }
         // A MATCH_PARENT leaf is only ever as wide as the column it was handed,
-        // so it says nothing about what is drawn inside it. QQ's icon is one —
         // it fills the whole 305px column while the glyph in it is about 55px —
         // and counting it would size every column to the screen quarter it
         // already had, which is the opposite of hugging the content.
@@ -1115,22 +928,11 @@ final class LiquidGlassInstaller {
         return v.getWidth();
     }
 
-    /**
-     * Replaces the app's equal-weight tab columns with fixed, content-sized ones.
-     *
-     * <p>Both apps give each tab {@code LinearLayout.LayoutParams(0, h, weight=1)}
-     * — WeChat in its own layout, QQ by way of {@code TabWidget.addView} — which
-     * only makes sense when the bar spans the screen. For a floating pill the
-     * width has to come from the content instead, mirroring KernelSU, where the
-     * row is {@code IntrinsicSize.Min} and every tab shares the widest column's
-     * width.
-     */
+
     private static int hugContentWidth(ViewGroup tabRow, float density) {
         if (tabRow == null || tabRow.getChildCount() == 0) {
             return 0;
         }
-        boolean iconOnly = isQqIconOnlyRow(tabRow);
-        applyQqIconOnlyAlignment(tabRow, iconOnly, density);
         int childCount = tabRow.getChildCount();
         int count = 0;
         int unspecified = View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED);
@@ -1153,7 +955,6 @@ final class LiquidGlassInstaller {
         }
         // An unbounded measure that comes back wider than the column the tab is
         // already laid out in has not measured content at all — it has fallen
-        // over. QQ reads 737px for a 305px column, because measuring a
         // MATCH_PARENT child against UNSPECIFIED is undefined and its
         // RelativeLayout answers with something unrelated. WeChat's 105px for
         // the same 305px column is a real content width and is kept.
@@ -1167,13 +968,7 @@ final class LiquidGlassInstaller {
         // measure when the layout will not measure unbounded, the leaves when
         // the widest thing in the tab sizes itself to the column — so the
         // maximum is the one that holds for both apps.
-        // In QAuxiliary's icon-only mode the MATCH_PARENT icon is the only real
-        // content. Its view width is the old full-screen slot rather than the
-        // 29dp glyph it draws, while badges are incidental and must not make the
-        // pill grow and shrink with unread counts. Use a stable 24dp content
-        // basis, which together with the normal 32dp breathing room gives each
-        // icon a 56dp touch column.
-        int widest = iconOnly ? Math.round(density * 24f) : Math.max(measured, leaf);
+        int widest = Math.max(measured, leaf);
         if (widest <= 0) {
             return 0;
         }
@@ -1181,13 +976,10 @@ final class LiquidGlassInstaller {
         // gives a cramped 46%-wide bar. Matching KernelSU's proportions means
         // giving each column the same generous breathing room it uses (~32dp per
         // side), then capping so the pill still clears the screen edges.
-        int pad = Math.round(density * 4f);
-        int tabWidth = widest + Math.round(density * 32f);
-        int screen = tabRow.getResources().getDisplayMetrics().widthPixels;
-        int maxTotal = screen - Math.round(density * 24f);
-        if (tabWidth * count + pad * 2 > maxTotal) {
-            tabWidth = (maxTotal - pad * 2) / count;
-        }
+        int pad = Math.round(density * GlassStyle.PANEL_PADDING_DP);
+        int screen = tabRow.getRootView().getWidth();
+        if (screen <= 0) screen = tabRow.getResources().getDisplayMetrics().widthPixels;
+        int tabWidth = GlassStyle.tabWidth(widest, count, screen, density);
         for (int i = 0; i < childCount; i++) {
             View tab = tabRow.getChildAt(i);
             if (tab.getVisibility() == View.GONE) {
@@ -1205,12 +997,11 @@ final class LiquidGlassInstaller {
         }
         // Horizontal inset only: the bar's height is WeChat's own and adding
         // vertical padding pushes the tabs out through the bottom of the pill.
-        tabRow.setPadding(pad, 0, pad, 0);
+        tabRow.setPadding(pad, pad, pad, pad);
         int total = tabWidth * count + pad * 2;
         LiquidGlassModule.log(android.util.Log.INFO,
                 "tab row hugged: content=" + widest
                         + " (measured=" + measured + " leaf=" + leaf + ")"
-                        + " mode=" + (iconOnly ? "icon-only" : "title")
                         + " tabWidth=" + tabWidth
                         + " total=" + total + " screen=" + screen);
         return total;
@@ -1250,7 +1041,6 @@ final class LiquidGlassInstaller {
             return;
         }
         // Both apps repaint the bar's own background when the theme changes —
-        // QQ through its skin engine, which hands the bar a fresh opaque
         // drawable and would bury the glass under it. Nothing announces that,
         // so it is re-checked here; the common case is a null field read.
         if (tabView.getBackground() != null) {
@@ -1298,15 +1088,7 @@ final class LiquidGlassInstaller {
         }
     }
 
-    /**
-     * Keeps QQ's docked-bar chrome hidden even when a skin refresh replaces it.
-     *
-     * <p>Day/night switches can build the replacement blur wrapper as GONE and
-     * make it visible only after our install pass. Remembering only the layer
-     * that happened to be visible during install therefore loses the new
-     * wrapper. Re-scan the small sibling list before every draw so both a
-     * re-shown instance and a replacement instance are caught before rendering.
-     */
+
     private static void holdOwnBarChromeHidden(LiquidGlassHostLayout host) {
         android.view.ViewParent rawParent = host.getParent();
         HostApp app = LiquidGlassModule.app();
@@ -1383,6 +1165,10 @@ final class LiquidGlassInstaller {
      * show it again, and this runs first in every one of them.
      */
     private static void keepNavBarClear() {
+        LiquidGlassModule.app().adapter.maintainWindow();
+    }
+
+    static void clearNavigationBar() {
         Activity a = sActivityRef.get();
         if (a == null) {
             return;
@@ -1401,15 +1187,7 @@ final class LiquidGlassInstaller {
         }
     }
 
-    /**
-     * Cheap fingerprint of the row topology and title layout mode.
-     *
-     * <p>Measured geometry is deliberately excluded because it changes on every
-     * layout. LayoutParams identity and the equal-weight bit are retained: QQ's
-     * Material bar can reuse the same TabViews while replacing their content or
-     * restoring {@code width=0, weight=1}, and either transition must re-hug the
-     * existing row.
-     */
+
     private static int tabStructureSignature(ViewGroup tabRow) {
         if (tabRow == null) {
             return 0;
@@ -1417,7 +1195,6 @@ final class LiquidGlassInstaller {
         int signature = System.identityHashCode(tabRow);
         signature = signature * 31 + tabRow.getVisibility();
         signature = signature * 31 + tabRow.getChildCount();
-        signature = signature * 31 + (isQqIconOnlyRow(tabRow) ? 1 : 0);
         for (int i = 0; i < tabRow.getChildCount(); i++) {
             View tab = tabRow.getChildAt(i);
             signature = signature * 31 + System.identityHashCode(tab);
@@ -1442,13 +1219,7 @@ final class LiquidGlassInstaller {
         return signature;
     }
 
-    /**
-     * Watches QQ's runtime-configurable tabs without measuring on every frame.
-     *
-     * <p>The actual repair is posted out of pre-draw: it changes LayoutParams and
-     * must be allowed to trigger a clean layout pass. Returning {@code true}
-     * tells the selection watcher to wait until the new row is rebound.
-     */
+
     private static boolean scheduleTabStructureRefreshIfNeeded(
             LiquidGlassHostLayout host) {
         View tabView = sTabViewRef.get();
@@ -1458,7 +1229,6 @@ final class LiquidGlassInstaller {
         ViewGroup current = TabBarBridge.findTabRow((ViewGroup) tabView);
         if (current == null || current.getVisibility() != View.VISIBLE
                 || TabBarBridge.tabCount(current) == 0) {
-            // QQ briefly detaches/empties Material's indicator while applying
             // the setting. Keep the old binding untouched and retry next frame
             // — but not indefinitely: a row that never comes back would
             // otherwise hold this method's `true` forever, and with it the
@@ -1506,12 +1276,10 @@ final class LiquidGlassInstaller {
                 return;
             }
 
-            // Newly created Material TabViews bring QQ's own backgrounds and
             // equal-weight widths and docked height back with them. Apply the
             // same treatment as the initial install, then resize the already-live
             // host around the row.
             stripSolidBackgrounds(tabView);
-            disableTabWidgetStrips(tabView);
             dropNavReserve(tabView);
             ViewGroup.LayoutParams tabLp = tabView.getLayoutParams();
             if (tabLp != null && sBarHeight > 0 && tabLp.height != sBarHeight) {
@@ -1558,11 +1326,7 @@ final class LiquidGlassInstaller {
         }
     }
 
-    /**
-     * QQ's skin refresh restores the docked bar's navigation padding without
-     * rebuilding the tab row. Topology fingerprints deliberately ignore
-     * geometry, so hold this small invariant separately on the pre-draw path.
-     */
+
     private static boolean restoreBarContentHeight(LiquidGlassHostLayout host) {
         View tabView = sTabViewRef.get();
         if (tabView == null) {
@@ -1594,6 +1358,7 @@ final class LiquidGlassInstaller {
             // navigation bar being held clear.
             try {
                 keepNavBarClear();
+                syncHostBottomInset(host, sNavigationInset);
                 dropBottomFrostAll();
                 holdOwnBarChromeHidden(host);
             } catch (Throwable t) {
@@ -1608,6 +1373,8 @@ final class LiquidGlassInstaller {
                     return true;
                 }
                 followBarOffset(host);
+                View bar = sTabViewRef.get();
+                if (bar instanceof ViewGroup) LiquidGlassModule.app().adapter.maintain((ViewGroup) bar, host);
                 if (scheduleTabStructureRefreshIfNeeded(host)) {
                     return true;
                 }
@@ -1787,16 +1554,7 @@ final class LiquidGlassInstaller {
         }
     }
 
-    /**
-     * Hides the app's own frosted layer behind the bar.
-     *
-     * <p>QQ ships one: a 54dp {@code QQBlurViewWrapper} pinned to the bottom of
-     * the same FrameLayout, drawn between the page and the tab bar. It is the
-     * app's answer to the same problem this module solves, and the two do not
-     * compose — left visible it covers the page the glass is meant to refract,
-     * so the pill would show a blur of a blur. WeChat has no equivalent and the
-     * list is simply empty there.
-     */
+
     private static void hideOwnBlurLayers(ViewGroup parent, View tabView) {
         HostApp app = LiquidGlassModule.app();
         if (app == null || app.hiddenSiblings.length == 0) {
@@ -1835,16 +1593,7 @@ final class LiquidGlassInstaller {
         }
     }
 
-    /**
-     * Hides the hairline the app rules across the top of its docked bar.
-     *
-     * <p>QQ draws it as a sibling of the bar — a 1px full-width View with a flat
-     * colour — so clearing backgrounds inside the bar never reaches it, and once
-     * the bar floats away it is left behind as a line straight across the page.
-     * Matched on shape, not class: it is a bare {@code android.view.View}, a name
-     * far too common to go by. One pixel tall and nearly the full width is not
-     * something else in this layout.
-     */
+
     private static void hideBarHairline(ViewGroup parent, View tabView) {
         float density = parent.getResources().getDisplayMetrics().density;
         int maxThickness = Math.max(2, Math.round(density * 1.5f));
@@ -1865,36 +1614,10 @@ final class LiquidGlassInstaller {
         }
     }
 
-    /**
-     * Turns off the divider strips {@code android.widget.TabWidget} draws itself.
-     *
-     * <p>QQ's bar is a TabWidget subclass, and the strips are painted in
-     * {@code dispatchDraw} rather than through the background — clearing the
-     * background does not touch them, and they would run right across the pill.
-     */
-    private static void disableTabWidgetStrips(View tabView) {
-        if (tabView instanceof android.widget.TabWidget) {
-            android.widget.TabWidget tw = (android.widget.TabWidget) tabView;
-            tw.setStripEnabled(false);
-            tw.setDividerDrawable(null);
-        }
-    }
 
-    /**
-     * Drops the room the bar holds at its bottom for the navigation bar.
-     *
-     * <p>A docked bar has to keep its tabs clear of the gesture pill, and QQ
-     * does it with bottom padding — 60px here, exactly the navigation inset.
-     * Floating puts the pill above that area to begin with, so the reserve
-     * survives only as a band of empty glass under the tabs, as tall as the
-     * inset. It has to go before the bar's height is read, since that height
-     * is what the pill is built to.
-     *
-     * <p>WeChat reserves nothing (its bar measures 162px with no padding at
-     * all), so this is a no-op there.
-     *
-     * @return the padding removed, which the caller owes the pill's height
-     */
+
+
+
     /**
      * Bar height that leaves the same gap above and below the tabs' content.
      *
@@ -1992,11 +1715,12 @@ final class LiquidGlassInstaller {
      * @return whether the window was actually grown
      */
     private static boolean extendUnderNavBar(Context ctx) {
+        return LiquidGlassModule.app().adapter.configureWindow(ctx);
+    }
+
+    static boolean enableEdgeToEdge(Context ctx) {
         if (Build.VERSION.SDK_INT < 30) {
             return false;
-        }
-        if (LiquidGlassModule.app() == HostApp.QQ) {
-            return false; // QQ NT breaks IME window insets if the root decor is hijacked
         }
         try {
             Activity activity = activityOf(ctx);
@@ -2172,8 +1896,8 @@ final class LiquidGlassInstaller {
         }
         FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) raw;
         float density = host.getResources().getDisplayMetrics().density;
-        int desired = Math.round(density * GlassConfig.barOffsetDp)
-                - host.shadowPad() + Math.max(0, inset);
+        int desired = GlassStyle.bottomMargin(inset,
+                parentBottomGap((View) host.getParent()), density) - host.shadowPad();
         if (lp.bottomMargin == desired) {
             return;
         }
@@ -2182,6 +1906,30 @@ final class LiquidGlassInstaller {
         LiquidGlassModule.log(android.util.Log.INFO,
                 "pill bottom anchor refreshed: inset=" + inset
                         + " margin=" + desired);
+    }
+
+    private static int parentBottomGap(View parent) {
+        int[] parentPos = new int[2];
+        int[] rootPos = new int[2];
+        View root = parent.getRootView();
+        parent.getLocationOnScreen(parentPos);
+        root.getLocationOnScreen(rootPos);
+        return Math.max(0, rootPos[1] + root.getHeight() - parentPos[1] - parent.getHeight());
+    }
+
+    private static int maximumLabelHeight(View view) {
+        if (view == null || view.getVisibility() == View.GONE) return 0;
+        if (view instanceof android.widget.TextView) {
+            return ((android.widget.TextView) view).getLineHeight();
+        }
+        int height = 0;
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                height = Math.max(height, maximumLabelHeight(group.getChildAt(i)));
+            }
+        }
+        return height;
     }
 
     /* ---------------- renderer ---------------- */
@@ -2271,14 +2019,7 @@ final class LiquidGlassInstaller {
         return selected >= 0 ? selected : TabBarBridge.slotForIndex(tabRow, appIndex);
     }
 
-    /**
-     * Called from the tab-switch hook on every in-app page switch — WeChat's
-     * {@code setTo(int)}, QQ's {@code setCurrentTab(int)}.
-     *
-     * <p>This doubles as the install trigger: both apps call it once during
-     * startup to select the initial tab, and by then the bar is guaranteed to
-     * exist — which the decor-view polling cannot guarantee.
-     */
+
     static void onTabChanged(View tabView, int index) {
         LiquidGlassHostLayout host = sHostRef.get();
         if (host != null && !host.isAttachedToWindow()) {
@@ -2316,18 +2057,7 @@ final class LiquidGlassInstaller {
         });
     }
 
-    /**
-     * Sizes and vertically places the droplet for the given tab. Horizontal
-     * position and all motion belong to {@link DropletDragController}'s springs.
-     *
-     * <p>Everything is measured against the host, whose children start at its
-     * shadow padding. Reading one level of {@code getTop()} only works while
-     * the tab row sits <em>inside</em> the bar; QQ's row <em>is</em> the bar, so
-     * the same expression counted that padding twice and dropped the droplet
-     * 14dp below — and, through the drag controller's twin expression, 14dp
-     * right of — the tab it belongs to, visibly outside the pill. Walking the
-     * parents and subtracting the padding is correct for both shapes.
-     */
+
     private static void syncDropletSize(int index) {
         try {
             View droplet = sDropletRef.get();
@@ -2350,18 +2080,16 @@ final class LiquidGlassInstaller {
             float density = host.getResources().getDisplayMetrics().density;
             // KernelSU sizes the droplet to the full tab column: width = tabWidth,
             // height = bar height - 2 * 4dp padding.
-            int inset = Math.round(density * 4f);
+            int inset = Math.round(density * GlassStyle.PANEL_PADDING_DP);
             int w = tab.getWidth();
-            // The column can measure taller than the pill — QQ lays its tabs out
             // at the old docked height and lets the bar clip them — so the
             // droplet is held inside the pill rather than hanging out of its
             // bottom edge.
-            int slot = Math.min(tab.getHeight(), pillBottom - pillTop);
-            int h = slot - inset * 2;
+            int h = Math.min(tab.getHeight(), pillBottom - pillTop - inset * 2);
             if (w <= 0 || h <= 0) {
                 return;
             }
-            int top = sPos[1] + inset;
+            int top = Math.max(sPos[1], pillTop + inset);
             if (top + h > pillBottom) {
                 top = pillBottom - h;
             }
@@ -2402,15 +2130,7 @@ final class LiquidGlassInstaller {
         return key;
     }
 
-    /**
-     * Re-places the droplet when the bar's own geometry moved under it.
-     *
-     * <p>Both apps rebuild parts of the bar on their own schedule — QQ restores
-     * its docked tab heights, WeChat re-applies page metrics — and none of that
-     * announces itself as a selection change. Without this the droplet keeps a
-     * size and offset measured against the old bar until the next tab switch,
-     * which is exactly the "glass sitting outside the bar" state.
-     */
+
     private static void maintainDropletGeometry() {
         if (sLastIndex < 0 || sDropletRef.get() == null) {
             return;

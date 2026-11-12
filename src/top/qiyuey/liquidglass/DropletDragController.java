@@ -1,4 +1,4 @@
-package io.github.liuran001.mmliquidglass;
+package top.qiyuey.liquidglass;
 
 import android.view.Choreographer;
 import android.view.MotionEvent;
@@ -35,10 +35,10 @@ import java.lang.ref.WeakReference;
 final class DropletDragController implements LiquidGlassHostLayout.DragHandler {
 
     /** KernelSU: pressedScale = 78dp / 56dp. */
-    private static final float PRESSED_SCALE = 78f / 56f;
+    private static final float PRESSED_SCALE = GlassStyle.PRESSED_SCALE;
     /** KernelSU: LocalFloatingBottomBarTabScale = lerp(1f, 1.2f, pressProgress). */
-    private static final float FOCUS_SCALE = 1.2f;
-    private static final float STRETCH_LIMIT = 0.2f;
+    private static final float FOCUS_SCALE = 1f + GlassStyle.TAB_ZOOM;
+    private static final float STRETCH_LIMIT = GlassStyle.STRETCH_LIMIT;
     /** KernelSU: release() waits until within 2.5% of the range. */
     private static final float SETTLE_FRACTION = 0.025f;
 
@@ -113,14 +113,7 @@ final class DropletDragController implements LiquidGlassHostLayout.DragHandler {
         mScaleY = new Spring(0.7f, 250f, 0.001f, 1f);
     }
 
-    /**
-     * Rebinds to the row the app currently owns.
-     *
-     * <p>QQ can add/remove tabs, or replace Material's SlidingTabIndicator,
-     * while the Activity stays alive. Cancelling any in-flight gesture keeps a
-     * half-finished spring from continuing against the old geometry; the
-     * selection watcher snaps to the current tab after the new row lays out.
-     */
+
     void setTabRow(ViewGroup tabRow) {
         mTabRowRef = new WeakReference<>(tabRow);
         mDragging = false;
@@ -144,6 +137,7 @@ final class DropletDragController implements LiquidGlassHostLayout.DragHandler {
      * the droplet out from under the finger.
      */
     void animateToIndex(int index, boolean immediate) {
+        immediate |= !android.animation.ValueAnimator.areAnimatorsEnabled();
         if (mDragging) {
             return;
         }
@@ -227,14 +221,25 @@ final class DropletDragController implements LiquidGlassHostLayout.DragHandler {
             case MotionEvent.ACTION_MOVE: {
                 float tabWidth = tabWidth(tabRow);
                 if (tabWidth > 0f) {
-                    float v = mDragStartValue + (ev.getX() - mDownX) / tabWidth;
-                    mValue.animateTo(clamp(v, 0f, tabCount - 1f));
+                    float v = mDragStartValue + direction(tabRow) * (ev.getX() - mDownX) / tabWidth;
+                    if (android.animation.ValueAnimator.areAnimatorsEnabled()) {
+                        mValue.animateTo(clamp(v, 0f, tabCount - 1f));
+                    } else {
+                        mValue.snapTo(clamp(v, 0f, tabCount - 1f));
+                    }
                     schedule();
                 }
                 return true;
             }
-            case MotionEvent.ACTION_UP:
             case MotionEvent.ACTION_CANCEL: {
+                mDragging = false;
+                int selected = TabBarBridge.selectedIndex(tabRow);
+                mValue.animateTo(Math.max(0, selected));
+                mVelocity.animateTo(0f);
+                release();
+                return true;
+            }
+            case MotionEvent.ACTION_UP: {
                 // KernelSU's onDragStopped: settle to the nearest index, then let
                 // that index flow back through the selection as the single source
                 // of truth. We only report it; the watcher drives the spring.
@@ -273,6 +278,7 @@ final class DropletDragController implements LiquidGlassHostLayout.DragHandler {
     /* ---------------- press / release ---------------- */
 
     private void press() {
+        if (!android.animation.ValueAnimator.areAnimatorsEnabled()) return;
         mLastSampleMs = 0L;
         mPress.animateTo(1f);
         mScaleX.animateTo(PRESSED_SCALE);
@@ -382,7 +388,7 @@ final class DropletDragController implements LiquidGlassHostLayout.DragHandler {
         ViewGroup.LayoutParams lp = droplet.getLayoutParams();
         float dropletW = lp != null && lp.width > 0 ? lp.width : droplet.getWidth();
         float originX = originInHost(tabRow, first, dropletW);
-        droplet.setTranslationX(originX + mValue.value() * tabWidth);
+        droplet.setTranslationX(originX + direction(tabRow) * mValue.value() * tabWidth);
 
         // KernelSU:
         //   scaleX /= 1f - (velocity * 0.75f).coerceIn(-0.2f, 0.2f)
@@ -445,16 +451,7 @@ final class DropletDragController implements LiquidGlassHostLayout.DragHandler {
         }
     }
 
-    /**
-     * Resting x of the first tab column, expressed as a translation for a
-     * droplet that is laid out at the host's padding origin.
-     *
-     * <p>Measured through the tree rather than from the row's own {@code
-     * getLeft()}: on QQ the row <em>is</em> the bar view, so that left already
-     * includes the host's shadow padding, and adding it to a position that
-     * starts at the host's padding counted the padding twice — the droplet rode
-     * one padding to the right of its tab, outside the pill.
-     */
+
     private float originInHost(ViewGroup tabRow, View first, float dropletW) {
         float centre = (first.getWidth() - dropletW) * 0.5f;
         View host = mHostRef.get();
@@ -476,6 +473,12 @@ final class DropletDragController implements LiquidGlassHostLayout.DragHandler {
 
     private static int tabCount(ViewGroup tabRow) {
         return Math.max(1, TabBarBridge.tabCount(tabRow));
+    }
+
+    private static float direction(ViewGroup row) {
+        View first = TabBarBridge.tabAt(row, 0);
+        View second = TabBarBridge.tabAt(row, 1);
+        return first != null && second != null && second.getLeft() < first.getLeft() ? -1f : 1f;
     }
 
     private static float clamp(float v, float lo, float hi) {

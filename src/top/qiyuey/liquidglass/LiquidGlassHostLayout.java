@@ -1,4 +1,4 @@
-package io.github.liuran001.mmliquidglass;
+package top.qiyuey.liquidglass;
 
 import android.content.Context;
 import android.content.res.Configuration;
@@ -151,18 +151,7 @@ final class LiquidGlassHostLayout extends FrameLayout {
         mDragHandler = handler;
     }
 
-    /**
-     * Keeps an outer drawer or pager from claiming a drag that began on the
-     * floating bar.
-     *
-     * <p>Call the parent directly instead of {@link #requestDisallowInterceptTouchEvent}:
-     * setting the flag on this ViewGroup as well would prevent our own
-     * {@link #onInterceptTouchEvent} from seeing the MOVE that starts a droplet
-     * drag. Taps still go to the app's tab children. Horizontal movement stays
-     * protected for the droplet, while a clearly vertical gesture is released
-     * after QQ's own tab widget has had enough travel to fire its native
-     * swipe-up callback.
-     */
+
     private void protectGestureFromAncestors(android.view.MotionEvent ev) {
         int action = ev.getActionMasked();
         android.view.ViewParent parent = getParent();
@@ -179,9 +168,8 @@ final class LiquidGlassHostLayout extends FrameLayout {
         if (action == android.view.MotionEvent.ACTION_MOVE && mAncestorsBlocked) {
             float dx = ev.getX() - mGestureDownX;
             float dy = ev.getY() - mGestureDownY;
-            // QQTabWidget's native upward action fires after 50 px. Releasing
             // before that would let the outer drawer cancel the child first.
-            float verticalRelease = Math.max(mTouchSlop, 50f);
+            float verticalRelease = mTouchSlop;
             if (Math.abs(dy) > verticalRelease && Math.abs(dy) > Math.abs(dx)) {
                 mAncestorsBlocked = false;
                 parent.requestDisallowInterceptTouchEvent(false);
@@ -265,18 +253,10 @@ final class LiquidGlassHostLayout extends FrameLayout {
                         + " textProbe=" + detected);
     }
 
-    /**
-     * Light or dark, from whichever signal the host app actually honours.
-     *
-     * <p>WeChat's uiMode is the whole story — it resolves day/night through
-     * standard {@code values-night} qualifiers — so the label probe there is
-     * logged and nothing more. QQ's skin engine has a night mode independent of
-     * the system's, and the labels are the only thing that reflects it, so the
-     * probe leads and uiMode is the fallback for when it finds no labels.
-     */
+
     private static boolean resolveDark(Context context, Boolean textProbe) {
         HostApp app = LiquidGlassModule.app();
-        if (app != null && app.preferTextColorProbe && textProbe != null) {
+        if (app != null && app.adapter.preferTextColorProbe() && textProbe != null) {
             return textProbe;
         }
         return isSystemNight(context);
@@ -284,7 +264,7 @@ final class LiquidGlassHostLayout extends FrameLayout {
 
     private static String darkSource(Boolean textProbe) {
         HostApp app = LiquidGlassModule.app();
-        return app != null && app.preferTextColorProbe && textProbe != null
+        return app != null && app.adapter.preferTextColorProbe() && textProbe != null
                 ? "text-color" : "uiMode";
     }
 
@@ -292,7 +272,6 @@ final class LiquidGlassHostLayout extends FrameLayout {
     void setGlassTuner(GlassTuner tuner) {
         mTuner = tuner;
         if (tuner != null) {
-            // QQ can use a skin whose light/dark state differs from uiMode.
             // The host has already resolved that from the live tab labels, so
             // initialise the renderer from the same source immediately rather
             // than waiting for a future theme transition that may never occur.
@@ -521,7 +500,7 @@ final class LiquidGlassHostLayout extends FrameLayout {
         // Only walk the labels for the apps that are decided by them; for the
         // rest this stays the config read it always was.
         HostApp app = LiquidGlassModule.app();
-        Boolean probe = app != null && app.preferTextColorProbe
+        Boolean probe = app != null && app.adapter.preferTextColorProbe()
                 ? detectDarkFromText(mBar) : null;
         boolean detected = resolveDark(getContext(), probe);
         if (!mThemeProbed) {

@@ -1,4 +1,4 @@
-package io.github.liuran001.mmliquidglass;
+package top.qiyuey.liquidglass;
 
 import android.content.Context;
 import android.graphics.Canvas;
@@ -44,16 +44,16 @@ import java.lang.ref.WeakReference;
 final class DropletPanel extends View {
 
     /** KernelSU: refractionHeight = 10.dp * progress, on a 56dp-tall droplet. */
-    private static final float REFRACTION_DP = 10f;
+    private static final float REFRACTION_DP = GlassStyle.DROPLET_REFRACTION_DP;
     /** KernelSU: refractionAmount = 14.dp * progress, on a 56dp-tall droplet. */
-    private static final float AMOUNT_DP = 14f;
+    private static final float AMOUNT_DP = GlassStyle.DROPLET_REFRACTION_AMOUNT_DP;
     /** KernelSU: chromaticAberration = 0.5f. */
-    private static final float ABERRATION = 0.5f;
+    private static final float ABERRATION = GlassStyle.CHROMATIC_ABERRATION;
     /** Slightly wider than the previous ~15% rim, without reaching the centre. */
     private static final float REFRACTION_FRACTION = 0.18f;
     /** Keep the pressed backdrop on the same material as the resting pill. */
-    private static final float BACKDROP_BLUR_DP = 4f;
-    private static final float BACKDROP_SATURATION = 1.5f;
+    private static final float BACKDROP_BLUR_DP = GlassStyle.BLUR_DP;
+    private static final float BACKDROP_SATURATION = GlassStyle.SATURATION;
     /**
      * KernelSU: {@code LocalFloatingBottomBarTabScale = lerp(1f, 1.2f, progress)}.
      *
@@ -62,7 +62,7 @@ final class DropletPanel extends View {
      * tabs are just as big, so there is far less room to grow into and a full
      * 1.2× pushes the icon straight through the rim.
      */
-    private static final float TAB_ZOOM = 0.1f;
+    private static final float TAB_ZOOM = GlassStyle.TAB_ZOOM;
 
     private static final String LENS_SHADER = ""
             + "uniform shader content;\n"
@@ -192,7 +192,7 @@ final class DropletPanel extends View {
                 return c;
             }
         }
-        return mAccentCache != 0 ? mAccentCache : 0xFF07C160; // WeChat green
+        return mAccentCache != 0 ? mAccentCache : LiquidGlassModule.app().adapter.fallbackAccent();
     }
 
     private static boolean isNeutral(int c) {
@@ -247,7 +247,6 @@ final class DropletPanel extends View {
         }
         if (tab.isSelected()) {
             // The selected tab is already painted in the accent colour by the
-            // app itself, so the tint has nothing to add — and QQ's selected
             // glyph is not one flat colour but a blue disc with a white mark
             // cut into it, which a flat SRC_ATOP pass would collapse into a
             // silhouette. Drawn as-is it keeps that detail, and its badge with
@@ -274,8 +273,6 @@ final class DropletPanel extends View {
         // untinted copy is what survives inside the clip.
         //
         // What counts as a badge is "does this view draw at all", asked through
-        // willNotDraw(). Asking whether it has a background instead missed QQ's
-        // QUIBadge, which paints its bubble in onDraw and carries no background
         // — so the red dot fell through to the tint and came out accent blue.
         if (tab instanceof ViewGroup) {
             mBadgeCount = 0;
@@ -304,7 +301,7 @@ final class DropletPanel extends View {
      */
     private static boolean ownsItsColour(View v) {
         HostApp app = LiquidGlassModule.app();
-        if (app != null && app.isTabIconClass(v.getClass().getName())) {
+        if (app != null && app.adapter.isTabIcon(v)) {
             return false;
         }
         return !(v instanceof android.widget.TextView && v.getBackground() == null);
@@ -334,7 +331,6 @@ final class DropletPanel extends View {
                     || child.getWidth() <= 0 || child.getHeight() <= 0) {
                 continue;
             }
-            // QQ's icon-only layout centres QUIBadge with translationY rather
             // than relaying it out. The untinted repaint has to clip where the
             // badge is actually drawn; using left/top alone leaves the lower
             // half outside the clip, where the accent pass turns it blue.
@@ -367,7 +363,6 @@ final class DropletPanel extends View {
             return centre;
         }
         View content = ((ViewGroup) tab).getChildAt(0);
-        // QQ's Material TabView exposes a full-column RelativeLayout here, not
         // the tight icon+label stack WeChat exposes. Treating 0..tabHeight as
         // content leaves no room for a rim and clamps the lens to almost zero.
         if (content.getVisibility() != VISIBLE || content.getHeight() <= 0
@@ -697,10 +692,7 @@ final class DropletPanel extends View {
             // edge deformation look too thin even though the centre stayed clear.
             float preferred = Math.min(band, h * REFRACTION_FRACTION);
             band = Math.min(band, Math.max(contentSafe, preferred));
-        } else if (LiquidGlassModule.app() == HostApp.QQ) {
-            // QQ's first child is layout chrome rather than measurable content.
-            // Use the same slightly widened fraction as WeChat while keeping the
-            // full 10dp shader value as a hard upper bound.
+        } else {
             band = Math.min(band, h * REFRACTION_FRACTION);
         }
         mLens.setFloatUniform("refractionHeight", band * p);

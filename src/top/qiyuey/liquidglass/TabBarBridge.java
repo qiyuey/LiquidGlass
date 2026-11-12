@@ -1,4 +1,4 @@
-package io.github.liuran001.mmliquidglass;
+package top.qiyuey.liquidglass;
 
 import android.view.View;
 import android.view.ViewGroup;
@@ -8,27 +8,7 @@ import java.lang.reflect.Method;
 import java.util.HashSet;
 import java.util.Set;
 
-/**
- * Bridge to the host app's own bottom tab bar.
- *
- * <p>Both targets obfuscate resource ids (AndResGuard turns them into
- * {@code app:id/huj}), so nothing here may look an id up by name. The UI class
- * names survive obfuscation, and with them the one method the app calls on
- * every in-app page switch — exactly the signal the droplet animation needs,
- * and the trigger that installs the pill in the first place.
- *
- * <pre>
- * WeChat: class LauncherUIBottomTabView extends RelativeLayout implements t1
- *         interface t1 { int getCurIdx(); void setTo(int); ... }
- *
- * QQ:     class QQTabWidget extends android.widget.TabWidget
- *         class QQTabLayout extends TabLayout implements FrameFragment$e
- *         interface FrameFragment$e { int getCurrentTab(); void setCurrentTab(int); ... }
- * </pre>
- *
- * <p>The class names themselves live in {@link HostApp}; this class only knows
- * how to work with them.
- */
+
 final class TabBarBridge {
 
     private static volatile boolean sHooked;
@@ -40,6 +20,16 @@ final class TabBarBridge {
         if (sHooked) {
             return;
         }
+        try {
+            app.adapter.installHooks(cl);
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            LiquidGlassModule.logErr("Host layout bridge unavailable", e);
+            return;
+        }
+        if (app.tabSwitchMethods.length == 0) {
+            sHooked = true; // This adapter observes native selection directly.
+            return;
+        }
         int hooked = 0;
         Set<Method> bound = new HashSet<>();
         for (String className : app.tabViewClasses) {
@@ -47,7 +37,6 @@ final class TabBarBridge {
             try {
                 cls = cl.loadClass(className);
             } catch (Throwable t) {
-                // Expected for QQ: only one of its two bars ships enabled, and
                 // which one depends on a server switch.
                 LiquidGlassModule.log(android.util.Log.INFO,
                         "tab bar class absent in this build: " + className);
@@ -57,7 +46,6 @@ final class TabBarBridge {
                 try {
                     Method m = switchMethod(cls, methodName);
                     // An inherited method is bound on the class declaring it,
-                    // so it reaches every instance of that class — for QQ's
                     // bar, every TabWidget in the process. Only the bar itself
                     // is let through then.
                     boolean shared = m.getDeclaringClass() != cls;
@@ -90,16 +78,7 @@ final class TabBarBridge {
         }
     }
 
-    /**
-     * The bar's own tab-switch method, or the one it inherits if it has none.
-     *
-     * <p>The bar's own copy is preferred because a hook on it reaches that class
-     * alone. QQ's {@code QQTabWidget} carries a pass-through override in 9.3.55
-     * to 9.3.70, but the Google Play build 8.2.11 declares none and runs
-     * {@code android.widget.TabWidget}'s as is. Asking for the declared method
-     * only left that build with nothing hooked, so the bar was found by the
-     * resume polling or not at all.
-     */
+
     private static Method switchMethod(Class<?> cls, String name)
             throws NoSuchMethodException {
         try {
@@ -140,6 +119,9 @@ final class TabBarBridge {
         ViewGroup byName = findTabView(root);
         if (byName != null) {
             return byName;
+        }
+        if (!LiquidGlassModule.app().adapter.allowShapeFallback()) {
+            return null; // Do not mistake a toolbar or an account-specific row for SwitchTab.
         }
         ViewGroup row = findTabRowByShape(root);
         if (row == null) {
@@ -287,19 +269,13 @@ final class TabBarBridge {
         return null;
     }
 
-    /**
-     * The horizontal row holding the tabs.
-     *
-     * <p>WeChat builds it in code as a plain LinearLayout child of the tab view,
-     * so it carries no id at all; QQ's material {@code TabLayout} keeps its tabs
-     * in a {@code SlidingTabIndicator}, which is also a horizontal LinearLayout
-     * child. QQ's other bar is an {@code android.widget.TabWidget}, which *is*
-     * the row — it holds the tabs directly, with no wrapper in between.
-     */
+
     static ViewGroup findTabRow(ViewGroup tabView) {
         if (tabView == null) {
             return null;
         }
+        ViewGroup adapted = LiquidGlassModule.app().adapter.tabRow(tabView);
+        if (adapted != null) return adapted;
         ViewGroup hiddenFallback = null;
         for (int i = 0; i < tabView.getChildCount(); i++) {
             View c = tabView.getChildAt(i);
@@ -334,7 +310,7 @@ final class TabBarBridge {
         }
         int count = 0;
         for (int i = 0; i < tabRow.getChildCount(); i++) {
-            if (tabRow.getChildAt(i).getVisibility() != View.GONE) {
+            if (isTabSlot(tabRow, tabRow.getChildAt(i))) {
                 count++;
             }
         }
@@ -349,7 +325,7 @@ final class TabBarBridge {
         int current = 0;
         for (int i = 0; i < tabRow.getChildCount(); i++) {
             View c = tabRow.getChildAt(i);
-            if (c.getVisibility() == View.GONE) {
+            if (!isTabSlot(tabRow, c)) {
                 continue;
             }
             if (current == slot) {
@@ -360,33 +336,24 @@ final class TabBarBridge {
         return null;
     }
 
-    /**
-     * Converts an app/logical index to the row's visible layout slot.
-     *
-     * <p>WeChat tags each tab with its logical index. QQ does not, so its raw
-     * child position is used. Either way a GONE feature placeholder is skipped.
-     */
+    private static boolean isTabSlot(ViewGroup row, View child) {
+        return child.getVisibility() != View.GONE
+                && LiquidGlassModule.app().adapter.isTab(child);
+    }
+
+
+
     static int slotForIndex(ViewGroup tabRow, int index) {
-        if (tabRow == null || index < 0) {
-            return -1;
-        }
+        if (tabRow == null || index < 0) return -1;
+        HostAdapter adapter = LiquidGlassModule.app().adapter;
         int slot = 0;
-        int rawSlot = -1;
         for (int i = 0; i < tabRow.getChildCount(); i++) {
-            View c = tabRow.getChildAt(i);
-            if (c.getVisibility() == View.GONE) {
-                continue;
-            }
-            Object tag = c.getTag();
-            if (tag instanceof Integer && (Integer) tag == index) {
-                return slot;
-            }
-            if (i == index) {
-                rawSlot = slot;
-            }
+            View child = tabRow.getChildAt(i);
+            if (!isTabSlot(tabRow, child)) continue;
+            if (adapter.logicalIndex(child, i) == index) return slot;
             slot++;
         }
-        return rawSlot;
+        return -1;
     }
 
     /** Lists the app-owned view classes under {@code root}, for miss diagnosis. */
@@ -422,41 +389,10 @@ final class TabBarBridge {
      * both reliable and free to poll.
      */
     static int selectedIndex(ViewGroup tabRow) {
-        if (tabRow == null) {
-            return -1;
-        }
-        int slot = 0;
-        for (int i = 0; i < tabRow.getChildCount(); i++) {
-            View c = tabRow.getChildAt(i);
-            if (c.getVisibility() == View.GONE) {
-                continue;
-            }
-            if (c.isSelected()) {
-                return slot;
-            }
-            slot++;
-        }
-        return -1;
+        return tabRow == null ? -1 : LiquidGlassModule.app().adapter.selectedSlot(tabRow);
     }
 
-    /**
-     * The selected tab, asked of the bar directly and observed if it will not say.
-     *
-     * <p>The getter is not something every bar has. WeChat's does. Of QQ's two,
-     * only {@code QQTabLayout} answers, and by an accident worth writing down:
-     * it inherits {@code getCurrentTab()} from the copy of the material
-     * {@code TabLayout} QQ ships, which has been patched to carry that method —
-     * the stock class has no such thing. {@code QQTabWidget}, the bar almost
-     * everyone actually runs, declares nothing of the sort and inherits
-     * {@code android.widget.TabWidget}, which has no getter either, so the
-     * lookup always throws there.
-     *
-     * <p>Hence the fallback rather than a second method name: the selection is
-     * already on the views themselves, put there by {@code TabWidget}'s own
-     * {@code setCurrentTab}, and {@link #selectedIndex} reads it off them. It is
-     * the same signal the per-frame watcher runs on, so a bar that answers
-     * neither way was never going to work.
-     */
+
     static int currentIndex(View tabView) {
         HostApp app = LiquidGlassModule.app();
         if (app == null) {
@@ -485,18 +421,7 @@ final class TabBarBridge {
     /** One hook per process; the instance it applies to is resolved per call. */
     private static volatile boolean sHookedPager;
 
-    /**
-     * Slot whose page the backdrop pager is actually showing, or -1 when that
-     * cannot be established.
-     *
-     * <p>Asked reflectively because the two hosts ship different pagers —
-     * WeChat's own {@code ViewPager} subclass, QQ's {@code ViewPager2} — and
-     * {@code getCurrentItem()} is the one accessor both carry.
-     *
-     * <p>Only a row in which every child takes part in the layout is trusted. A
-     * GONE tab shifts every later page by one, and following the page is not
-     * worth putting the droplet on the wrong tab for.
-     */
+
     static int pageSlot(ViewGroup pager, ViewGroup tabRow) {
         if (pager == null || tabRow == null
                 || tabCount(tabRow) != tabRow.getChildCount()) {
@@ -603,7 +528,6 @@ final class TabBarBridge {
                 final Method setItemSmooth = setItemBool;
                 LiquidGlassModule.hookIntercept(setItemSmooth, chain -> {
                     // Binding is per class, so every pager in the app lands
-                    // here. On QQ the declaring class is AndroidX's own
                     // ViewPager2, shared with the profile card carousel and
                     // every TabLayoutMediator in the app; on WeChat it is the
                     // WxViewPager base of the home pager. Only the backdrop the

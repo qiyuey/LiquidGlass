@@ -1,4 +1,4 @@
-package io.github.liuran001.mmliquidglass;
+package top.qiyuey.liquidglass;
 
 import android.graphics.Canvas;
 import android.graphics.RecordingCanvas;
