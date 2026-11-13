@@ -14,6 +14,7 @@ interface HostAdapter {
     default boolean isTab(View child) { return true; }
     default boolean preferTextColorProbe() { return false; }
     default boolean isTabIcon(View child) { return false; }
+    default boolean redrawRestingTab() { return true; }
     default void prepareTabs(ViewGroup bar) {}
     default void onMounted(ViewGroup bar) {}
     default void maintain(ViewGroup bar, View host) {}

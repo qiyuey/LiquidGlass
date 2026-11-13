@@ -1,6 +1,7 @@
 package top.qiyuey.liquidglass;
 
 import android.app.Activity;
+import android.graphics.Canvas;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
@@ -141,6 +142,7 @@ final class WeWorkAdapter implements HostAdapter {
         }
     }
 
+    @Override public boolean redrawRestingTab() { return false; }
     @Override public boolean allowShapeFallback() { return false; }
     @Override public ViewGroup tabRow(ViewGroup bar) { prepareTabs(bar); return bar; }
     @Override public void extendPages(ViewGroup backdrop) {
@@ -174,6 +176,8 @@ final class WeWorkAdapter implements HostAdapter {
     }
 
     @Override public void installHooks(ClassLoader loader) throws ReflectiveOperationException {
+        installWatermarkHook(loader);
+        WeWorkAntiRecall.install(loader);
         Class<?> barClass = loader.loadClass(BAR);
         sSetMeasuredDimension = View.class.getDeclaredMethod("setMeasuredDimension", int.class, int.class);
         sSetMeasuredDimension.setAccessible(true);
@@ -225,6 +229,20 @@ final class WeWorkAdapter implements HostAdapter {
             layoutFloating(bar);
             return null;
         });
+    }
+
+    private void installWatermarkHook(ClassLoader loader) {
+        try {
+            Class<?> overlay = loader.loadClass("com.tencent.wework.launch.AllWaterMaskView");
+            // WeCom 5.0.13 shares this text renderer between the window overlay and page views.
+            Class<?> renderer = overlay.getDeclaredField("d").getType();
+            Method drawText = renderer.getDeclaredMethod("o", Canvas.class, int.class, int.class);
+            if (drawText.getReturnType() == void.class) {
+                LiquidGlassModule.hookIntercept(drawText, chain -> null);
+            }
+        } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
+            LiquidGlassModule.logErr("WeCom watermark renderer unavailable", e);
+        }
     }
 
     private void measureFloating(ViewGroup bar, int widthSpec, int heightSpec)

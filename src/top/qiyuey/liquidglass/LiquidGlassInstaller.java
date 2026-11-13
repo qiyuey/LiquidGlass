@@ -524,7 +524,15 @@ final class LiquidGlassInstaller {
         View tab = sTabViewRef.get();
         if (tab instanceof ViewGroup) LiquidGlassModule.app().adapter.onMounted((ViewGroup) tab);
         int pad = bottomReserve(backdrop);
-        if (pad > 0) padScrollersBottom(backdrop, pad, 0);
+        if (pad > 0) {
+            // Short wrap-content lists, such as WeCom's department breadcrumbs,
+            // grow by the padding and push the following content down.
+            float gap = LAST_ROW_GAP_DP * backdrop.getResources().getDisplayMetrics().density;
+            View window = backdrop.getRootView();
+            window.getLocationOnScreen(sLoc);
+            int pillTop = Math.round(sLoc[1] + window.getHeight() - pad + gap);
+            padScrollersBottom(backdrop, pad, 0, pillTop);
+        }
     }
 
     static void extendPagerPages(ViewGroup pager) {
@@ -640,7 +648,7 @@ final class LiquidGlassInstaller {
             stretchToBottom(c, pageHeight);
             keepStretchedToBottom(c);
         }
-        padScrollersBottom(pg, bottomReserve(pg), 0);
+        padScrollersBottom(pg, bottomReserve(pg), 0, null);
     }
 
     /** Breathing room between the last row and the pill once it is scrolled clear. */
@@ -795,7 +803,7 @@ final class LiquidGlassInstaller {
      * of the floating pill, with {@code clipToPadding=false} so rows still render
      * through the padded band — i.e. behind and below the pill.
      */
-    private static void padScrollersBottom(ViewGroup root, int pad, int depth) {
+    private static void padScrollersBottom(ViewGroup root, int pad, int depth, Integer pillTop) {
         if (depth > 12) {
             return;
         }
@@ -806,15 +814,19 @@ final class LiquidGlassInstaller {
             // levels below untouched. Pass through pager RecyclerViews and pad
             // the first actual scrolling container inside each page instead.
             if (isViewPagerRecycler(c)) {
-                padScrollersBottom((ViewGroup) c, pad, depth + 1);
+                padScrollersBottom((ViewGroup) c, pad, depth + 1, pillTop);
             } else if (isScroller(c)) {
                 ViewGroup sv = (ViewGroup) c;
+                if (pillTop != null) {
+                    sv.getLocationOnScreen(sLoc);
+                    if (sLoc[1] + sv.getHeight() <= pillTop) continue;
+                }
                 // containers below the page root and still measures it to the
                 // old docked bar. Its parent owns that reserve as bottom padding,
                 // so remove it before stretching the feed itself. Only touch a
                 // top-anchored scroller; title-offset lists keep their origin.
                 int parentHeight = root.getHeight();
-                if (c.getTop() <= 8 && parentHeight - c.getBottom() > 8) {
+                if (pillTop == null && c.getTop() <= 8 && parentHeight - c.getBottom() > 8) {
                     dropParentBottomReserve(root, c);
                     stretchToBottom(c, parentHeight);
                     keepStretchedToBottom(c);
@@ -834,7 +846,7 @@ final class LiquidGlassInstaller {
                     trackPaddedScroller(sv);
                 }
             } else if (c instanceof ViewGroup) {
-                padScrollersBottom((ViewGroup) c, pad, depth + 1);
+                padScrollersBottom((ViewGroup) c, pad, depth + 1, pillTop);
             }
         }
     }

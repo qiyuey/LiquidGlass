@@ -375,6 +375,7 @@ final class DropletPanel extends View {
     }
 
     private float mProgress;
+    private final boolean mRedrawRestingTab;
 
     DropletPanel(Context ctx, ViewGroup pager, ViewGroup tabRow,
                  float density, boolean night) {
@@ -382,6 +383,7 @@ final class DropletPanel extends View {
         mPagerRef = new WeakReference<>(pager);
         mTabRowRef = new WeakReference<>(tabRow);
         mDensity = density;
+        mRedrawRestingTab = LiquidGlassModule.app().adapter.redrawRestingTab();
         mPad = Math.round(AMOUNT_DP * density) + Math.round(density * 4f);
 
         if (Build.VERSION.SDK_INT >= LiquidGlassPanel.LENS_MIN_SDK) {
@@ -477,7 +479,9 @@ final class DropletPanel extends View {
         // order by repainting the current tab after the tints.
         if (!drewLens) {
             drawSurfaceTints(canvas, 0f, 0f, w, h, radius, p);
-            drawRestingTab(canvas);
+            if (mRedrawRestingTab) {
+                drawRestingTab(canvas);
+            }
         }
         if (p > 0f) {
             mHighlight.setAlpha(Math.round(0x1F * p));
