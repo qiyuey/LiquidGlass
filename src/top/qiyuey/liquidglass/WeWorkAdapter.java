@@ -177,7 +177,6 @@ final class WeWorkAdapter implements HostAdapter {
 
     @Override public void installHooks(ClassLoader loader) throws ReflectiveOperationException {
         installWatermarkHook(loader);
-        WeWorkAntiRecall.install(loader);
         Class<?> barClass = loader.loadClass(BAR);
         sSetMeasuredDimension = View.class.getDeclaredMethod("setMeasuredDimension", int.class, int.class);
         sSetMeasuredDimension.setAccessible(true);
